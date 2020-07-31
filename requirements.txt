@@ -1,0 +1,3 @@
+pymssql
+woocommerce
+python-dotenv

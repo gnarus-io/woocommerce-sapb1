@@ -1,5 +1,4 @@
-.pypirc
-*.pyc
-.sync/*
-Flask_SAPB1.egg-info/*
-dist/*
+*.bat
+.env
+.customer
+**/*.pyc

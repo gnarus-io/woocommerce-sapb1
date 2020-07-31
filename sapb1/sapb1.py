@@ -1,18 +1,14 @@
-from flask import current_app, g
 import pymssql
 import datetime
 from time import time
 import decimal
-
-try:
-    from flask import _app_ctx_stack as stack
-except ImportError:
-    from flask import _request_ctx_stack as stack
+import os
 
 
 class SAPB1COMAdaptor(object):
     """Adaptor contains SAP B1 COM object.
     """
+
     def __init__(self, company=None):
         self._company = company
 
@@ -28,14 +24,12 @@ class SAPB1COMAdaptor(object):
 
     def disconnect(self):
         self._company.Disconnect()
-        log = "Close SAPB1 connection for " + self._company.CompanyName
-        current_app.logger.info(log)
-
 
 
 class MSSQLCursorAdaptor(object):
     """MS SQL cursor object.
     """
+
     def __init__(self, sqlSrvConn=None):
         self._sqlSrvConn = sqlSrvConn
         self._sqlSrvCursor = self._sqlSrvConn.cursor(as_dict=True)
@@ -51,92 +45,62 @@ class MSSQLCursorAdaptor(object):
 
     def disconnect(self):
         self._sqlSrvConn.close()
-        log = "Close SAPB1 DB connection"
-        current_app.logger.info(log)
-
 
 
 class SAPB1Adaptor(object):
     """SAP B1 Adaptor with functions.
     """
 
-    def __init__(self, app=None):
-        self.app = app
-        if app is not None:
-            self.init_app(app)
-
-    def init_app(self, app):
-        """Use the newstyle teardown_appcontext if it's available,
-        otherwise fall back to the request context
-        """
-        if hasattr(app, 'teardown_appcontext'):
-            app.teardown_appcontext(self.teardown)
-        else:
-            app.teardown_request(self.teardown)
-
     def connect(self, type=None):
         """Initiate the connect with SAP B1 and MS SQL server.
         """
         if type == "COM":
-            SAPbobsCOM = __import__(current_app.config['DIAPI'], globals(), locals(), [], -1)
+            SAPbobsCOM = __import__(
+                os.getenv('DIAPI'), globals(), locals(), [], -1)
             self.constants = getattr(SAPbobsCOM, "constants")
             Company = getattr(SAPbobsCOM, "Company")
             company = Company()
-            company.Server = current_app.config['SERVER']
+            company.Server = os.getenv('SERVER')
             company.UseTrusted = False
-            company.language = eval("self.constants." + current_app.config['LANGUAGE'])
-            company.DbServerType = eval("self.constants." + current_app.config['DBSERVERTYPE'])
-            company.CompanyDB = current_app.config['COMPANYDB']
-            company.UserName = current_app.config['B1USERNAME']
-            company.Password = current_app.config['B1PASSWORD']
+            company.language = eval("self.constants." + os.getenv('LANGUAGE'))
+            company.DbServerType = eval(
+                "self.constants." + os.getenv('DBSERVERTYPE'))
+            company.CompanyDB = os.getenv('COMPANYDB')
+            company.UserName = os.getenv('B1USERNAME')
+            company.Password = os.getenv('B1PASSWORD')
             company.Connect()
-            log = "Open SAPB1 connection for " + company.CompanyName
-            current_app.logger.info(log)
             return SAPB1COMAdaptor(company=company)
         elif type == "CURSOR":
-            sqlSrvConn = pymssql.connect(current_app.config['SERVER'],
-                                        current_app.config['DBUSERNAME'],
-                                        current_app.config['DBPASSWORD'],
-                                        current_app.config['COMPANYDB'])
-            log = "Open SAPB1 DB connection"
-            current_app.logger.info(log)
+            sqlSrvConn = pymssql.connect(os.getenv('SERVER'),
+                                        os.getenv('DBUSERNAME'),
+                                        os.getenv('DBPASSWORD'),
+                                        os.getenv('COMPANYDB'))
             return MSSQLCursorAdaptor(sqlSrvConn=sqlSrvConn)
         else:
             return None
-
-    def teardown(self, exception):
-        ctx = stack.top
-        if hasattr(ctx, 'sapb1COMAdaptor'):
-            ctx.sapb1COMAdaptor.disconnect()
-        if hasattr(ctx, 'msSQLCursorAdaptor'):
-            ctx.msSQLCursorAdaptor.disconnect()
 
     def info(self):
         """Show the information for the SAP B1 connection.
         """
         data = {
             'company_name': self.comAdaptor.company.CompanyName,
-            'diapi': current_app.config['DIAPI'],
-            'server': current_app.config['SERVER'],
-            'company_db': current_app.config['COMPANYDB']
+            'diapi': os.getenv('DIAPI'),
+            'server': os.getenv('SERVER'),
+            'company_db': os.getenv('COMPANYDB')
         }
         return data
 
     @property
     def comAdaptor(self):
-        ctx = stack.top
-        if ctx is not None:
-            if not hasattr(ctx, 'sapb1COMAdaptor'):
-                ctx.sapb1COMAdaptor = self.connect(type="COM")
-            return ctx.sapb1COMAdaptor
+        if not hasattr(self, 'sapb1COMAdaptor'):
+            self.sapb1COMAdaptor = self.connect(type="COM")
+        return self.sapb1COMAdaptor
 
     @property
     def cursorAdaptor(self):
-        ctx = stack.top
-        if ctx is not None:
-            if not hasattr(ctx, 'msSQLCursorAdaptor'):
-                ctx.msSQLCursorAdaptor = self.connect(type="CURSOR")
-            return ctx.msSQLCursorAdaptor
+        if not hasattr(self, 'msSQLCursorAdaptor'):
+            self.msSQLCursorAdaptor = self.connect(type="CURSOR")
+        return self.msSQLCursorAdaptor
 
     def trimValue(self, value, maxLength):
         """Trim the value.
@@ -144,6 +108,30 @@ class SAPB1Adaptor(object):
         if len(value) > maxLength:
             return value[0:maxLength-1]
         return value
+
+    def getItems(self, num=1, columns=[], params={}):
+        """Retrieve items from SAP B1.
+        """
+        cols = '*'
+        if len(columns) > 0:
+            cols = " ,".join(columns)
+        ops = {key: '=' if 'op' not in params[key].keys() else params[key]['op'] for key in params.keys()}
+        sql = """SELECT top {0} {1} FROM dbo.OITM""".format(num, cols)
+        if len(params) > 0:
+            sql = sql + ' WHERE ' + " AND ".join(["{0} {1} %({2})s".format(k, ops[k], k) for k in params.keys()])
+        self.cursorAdaptor.sqlSrvCursor.execute(sql, {key: params[key]['value'] for key in params.keys()})
+        items = []
+        for row in self.cursorAdaptor.sqlSrvCursor:
+            item = {}
+            for k, v in row.items():
+                value = ''
+                if type(v) is datetime.datetime:
+                    value = v.strftime("%Y-%m-%d %H:%M:%S")
+                elif v is not None:
+                    value = str(v)
+                item[k] = value
+            items.append(item)
+        return items
 
     def getOrders(self, num=1, columns=[], params={}):
         """Retrieve orders from SAP B1.
@@ -321,7 +309,6 @@ class SAPB1Adaptor(object):
         lRetCode = busPartner.Update()
         if lRetCode != 0:
             log = self.company.GetLastErrorDescription()  # self.company.GetLastError()
-            current_app.logger.error(log)
             raise Exception(log)
 
         cntct = {
@@ -487,7 +474,6 @@ class SAPB1Adaptor(object):
         lRetCode = order.Add()
         if lRetCode != 0:
             error = str(self.comAdaptor.company.GetLastError())
-            current_app.logger.error(error)
             raise Exception(error)
         else:
             params = None
